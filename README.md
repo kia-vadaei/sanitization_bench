@@ -24,7 +24,7 @@ It does **not** depend on PyTorch, TensorFlow, or HuggingFace Datasets.
 Development install:
 
 ```bash
-git clone https://github.com/<your-username>/sanitization-bench.git
+git clone https://github.com/kia-vadaei/sanitization_bench.git
 cd sanitization-bench
 pip install -e .
 ```
@@ -32,7 +32,7 @@ pip install -e .
 Direct GitHub install:
 
 ```bash
-pip install git+https://github.com/<your-username>/sanitization-bench.git
+pip install git+https://github.com/kia-vadaei/sanitization_bench.git
 ```
 
 ---
