@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Iterable
+from typing import Any
 
 
 VARIANT_ALIASES = {
@@ -20,48 +20,111 @@ VARIANT_ALIASES = {
 }
 
 
-def resolve_percentage(variant: str, percentage: float | None) -> float:
-    variant_norm = str(variant).strip().lower()
-    if variant_norm == "custom":
-        if percentage is None:
-            raise ValueError("variant='custom' requires percentage=<float between 0 and 100>.")
-        pct = float(percentage)
-    elif variant_norm in VARIANT_ALIASES:
-        pct = VARIANT_ALIASES[variant_norm]
-    else:
+def _parse_variant_percentage(variant: str) -> float:
+    """Parse arbitrary variants such as '35%', '35', or '0.35'."""
+    value = variant.strip().lower()
+
+    if value.endswith("%"):
+        value = value[:-1].strip()
+
+    try:
+        numeric_value = float(value)
+    except ValueError as exc:
         raise ValueError(
-            "Unsupported variant. Use one of: '10%', '20%', '100%', 'custom'. "
-            f"Received: {variant!r}"
-        )
+            "Unsupported variant. Use an empty variant with percentage=<number>, "
+            "a percentage such as '35%', or one of the predefined aliases."
+        ) from exc
+
+    # Variant fractions such as 0.35 mean 35%.
+    if 0 < numeric_value <= 1:
+        numeric_value *= 100
+
+    return numeric_value
+
+
+def resolve_percentage(
+    variant: str = "",
+    percentage: float | None = None,
+) -> float:
+    """Resolve the requested dataset percentage.
+
+    Supported forms:
+
+    variant="", percentage=35
+    variant=""
+    variant="35%"
+    variant="35"
+    variant="0.35"
+    variant="custom", percentage=35
+    variant="full"
+    """
+    variant_norm = str(variant or "").strip().lower()
+
+    if variant_norm == "":
+        # Empty variant means use the explicitly supplied percentage.
+        # When no percentage is provided, load the full split.
+        pct = 100.0 if percentage is None else float(percentage)
+
+    elif variant_norm == "custom":
+        if percentage is None:
+            raise ValueError(
+                "variant='custom' requires percentage=<float between 0 and 100>."
+            )
+        pct = float(percentage)
+
+    elif variant_norm in VARIANT_ALIASES:
+        if percentage is not None:
+            raise ValueError(
+                "Do not provide percentage when variant already defines a percentage. "
+                "Use variant='' with percentage=<number> instead."
+            )
+        pct = VARIANT_ALIASES[variant_norm]
+
+    else:
+        if percentage is not None:
+            raise ValueError(
+                "Use either variant='<percentage>' or "
+                "variant='' with percentage=<number>, not both."
+            )
+        pct = _parse_variant_percentage(variant_norm)
 
     if not (0 < pct <= 100):
         raise ValueError(f"percentage must be in (0, 100], got {pct}")
+
     return pct
 
 
 def deterministic_sample(
     examples: list[dict[str, Any]],
     *,
-    variant: str = "100%",
+    variant: str = "",
     percentage: float | None = None,
     seed: int = 42,
 ) -> list[dict[str, Any]]:
+    """Return a deterministic percentage of the selected split."""
     pct = resolve_percentage(variant, percentage)
+
     if pct >= 100:
         return list(examples)
 
-    n = len(examples)
-    if n == 0:
+    total = len(examples)
+    if total == 0:
         return []
 
-    sample_size = max(1, int(round(n * pct / 100.0)))
-    indices = list(range(n))
+    sample_size = max(1, int(round(total * pct / 100.0)))
+
+    indices = list(range(total))
     rng = random.Random(seed)
     rng.shuffle(indices)
-    selected = set(indices[:sample_size])
 
-    # Preserve original order after deterministic selection.
-    return [example for idx, example in enumerate(examples) if idx in selected]
+    selected_indices = set(indices[:sample_size])
+
+    # Preserve the original dataset order.
+    return [
+        example
+        for index, example in enumerate(examples)
+        if index in selected_indices
+    ]
 
 
 def deterministic_split(
@@ -72,32 +135,38 @@ def deterministic_split(
     train_ratio: float = 0.8,
     dev_ratio: float = 0.1,
 ) -> list[dict[str, Any]]:
-    """Create a deterministic train/dev/test split for datasets without official splits.
-
-    Split is applied at the already-normalized example level. Adapters choose the example
-    level carefully: author-level for SynthPAI, document-level for SPIA, etc.
-    """
+    """Create deterministic train/dev/test splits for datasets without official splits."""
     split_norm = str(split).strip().lower()
+
     if split_norm in {"all", "full", "100%"}:
         return list(examples)
+
     if split_norm == "validation":
         split_norm = "dev"
-    if split_norm not in {"train", "dev", "test"}:
-        raise ValueError("split must be one of 'all', 'train', 'dev'/'validation', or 'test'.")
 
-    n = len(examples)
-    indices = list(range(n))
+    if split_norm not in {"train", "dev", "test"}:
+        raise ValueError(
+            "split must be one of 'all', 'train', 'dev'/'validation', or 'test'."
+        )
+
+    total = len(examples)
+    indices = list(range(total))
+
     rng = random.Random(seed)
     rng.shuffle(indices)
 
-    train_end = int(round(n * train_ratio))
-    dev_end = train_end + int(round(n * dev_ratio))
+    train_end = int(round(total * train_ratio))
+    dev_end = train_end + int(round(total * dev_ratio))
 
     if split_norm == "train":
-        chosen = set(indices[:train_end])
+        chosen_indices = set(indices[:train_end])
     elif split_norm == "dev":
-        chosen = set(indices[train_end:dev_end])
+        chosen_indices = set(indices[train_end:dev_end])
     else:
-        chosen = set(indices[dev_end:])
+        chosen_indices = set(indices[dev_end:])
 
-    return [example for idx, example in enumerate(examples) if idx in chosen]
+    return [
+        example
+        for index, example in enumerate(examples)
+        if index in chosen_indices
+    ]
