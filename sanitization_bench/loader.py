@@ -7,19 +7,25 @@ from tqdm.auto import tqdm
 
 from .dataset import SanitizationDataset
 from .registry import get_adapter_class, list_dataset_names
-from .sampling import deterministic_sample
+from .sampling import deterministic_sample, resolve_percentage
 from .schema import validate_example
 
 
 def list_datasets() -> list[str]:
+    """Return the canonical names of all registered datasets."""
     return list_dataset_names()
+
+
+def _format_percentage(percentage: float) -> str:
+    """Convert a percentage to a canonical variant label."""
+    return f"{percentage:g}%"
 
 
 def load_dataset(
     name: str,
     *,
     split: str = "train",
-    variant: str = "100%",
+    variant: str = "",
     percentage: float | None = None,
     seed: int = 42,
     cache_dir: str | Path = "./data",
@@ -30,39 +36,100 @@ def load_dataset(
     keep_raw: bool = True,
     validate: bool = True,
 ) -> SanitizationDataset:
-    """Load a normalized sanitization benchmark dataset.
+    """Load one normalized sanitization benchmark dataset.
+
+    Sampling is applied after the requested split is loaded. Therefore:
+
+    - split="train", percentage=35 returns 35% of train.
+    - split="test", percentage=35 returns 35% of test.
 
     Parameters
     ----------
     name:
-        One of: 'tab', 'synthpai', 'spia', 'qatd2k'.
+        Registered dataset name. Supported canonical names are:
+        ``tab``, ``synthpai``, ``spia``, and ``qatd2k``.
+
     split:
-        Official split if available, otherwise deterministic split from normalized examples.
+        Requested dataset split. Official splits are used when available.
+        Otherwise, the adapter creates a deterministic split.
+
     variant:
-        One of: '10%', '20%', '100%', 'custom'. Aliases such as 'full' and '10pct' also work.
+        Optional sampling alias.
+
+        Preferred usage is::
+
+            variant=""
+            percentage=35
+
+        Percentage aliases such as ``"35%"`` and ``"full"`` are also
+        supported. ``"custom"`` remains supported for backward compatibility.
+
     percentage:
-        Required when variant='custom'.
+        Percentage of the selected split to retain. Must be greater than zero
+        and less than or equal to 100.
+
+        When ``variant=""`` and ``percentage=None``, the full selected split
+        is returned.
+
     seed:
-        Fixed seed for deterministic generated splits and variant sampling.
+        Seed used for deterministic generated splits and percentage sampling.
+
     cache_dir:
-        Directory where raw downloaded files are cached.
+        Directory containing or receiving the raw dataset files.
+
     source:
-        Dataset-specific source. For SPIA: 'panorama_151', 'panorama_531', 'tab_144', or 'all'.
+        Dataset-specific source selector. For SPIA, supported sources include
+        ``panorama_151``, ``panorama_531``, ``tab_144``, and ``all``.
+
     granularity:
-        Dataset-specific example granularity. Defaults preserve multi-hop structure.
+        Dataset-specific example granularity.
+
     download:
-        If True, download missing files from their public sources.
+        Download missing public source files when enabled.
+
     show_progress:
-        If True, show tqdm progress bars.
+        Show loading and validation progress bars when enabled.
+
     keep_raw:
-        If True, include original raw records in example['raw'].
+        Preserve the original source record in ``example["raw"]``.
+
     validate:
-        If True, run lightweight schema validation.
+        Validate every returned example against the canonical schema.
+
+    Returns
+    -------
+    SanitizationDataset
+        The normalized and deterministically sampled dataset.
     """
-    adapter_cls = get_adapter_class(name)
+    normalized_name = str(name).strip()
+    normalized_split = str(split).strip().lower()
+    normalized_variant = str(variant or "").strip()
+
+    if not normalized_name:
+        raise ValueError("name must not be empty.")
+
+    if not normalized_split:
+        raise ValueError("split must not be empty.")
+
+    if normalized_split == "validation":
+        normalized_split = "dev"
+
+    # Resolve all accepted sampling configurations into one percentage.
+    resolved_percentage = resolve_percentage(
+        variant=normalized_variant,
+        percentage=percentage,
+    )
+
+    # The stored variant is always explicit, even when the caller used "".
+    effective_variant = _format_percentage(resolved_percentage)
+
+    resolved_cache_dir = Path(cache_dir).expanduser().resolve()
+
+    adapter_cls = get_adapter_class(normalized_name)
+
     adapter = adapter_cls(
-        cache_dir=cache_dir,
-        split=split,
+        cache_dir=resolved_cache_dir,
+        split=normalized_split,
         source=source,
         granularity=granularity,
         download=download,
@@ -71,36 +138,46 @@ def load_dataset(
         seed=seed,
     )
 
-    examples = adapter.load()
+    # The adapter first selects or creates the requested train/test/dev split.
+    examples = list(adapter.load())
+    original_size = len(examples)
+
+    # Sampling is then applied only to that selected split.
+    sampled_examples = deterministic_sample(
+        examples,
+        variant="",
+        percentage=resolved_percentage,
+        seed=seed,
+    )
 
     if validate:
         for example in tqdm(
-            examples,
-            desc=f"Validating {adapter.name}",
+            sampled_examples,
+            desc=f"Validating {adapter.name}/{normalized_split}",
             unit="example",
             disable=not show_progress,
         ):
             validate_example(example)
 
-    sampled = deterministic_sample(
-        examples,
-        variant=variant,
-        percentage=percentage,
-        seed=seed,
-    )
-
     metadata: dict[str, Any] = {
         "source": source,
         "granularity": granularity,
-        "cache_dir": str(Path(cache_dir).resolve()),
-        "original_size_before_sampling": len(examples),
+        "cache_dir": str(resolved_cache_dir),
+        "requested_variant": normalized_variant,
+        "requested_percentage": percentage,
+        "effective_variant": effective_variant,
+        "resolved_percentage": resolved_percentage,
+        "original_size_before_sampling": original_size,
+        "sampled_size": len(sampled_examples),
+        "sampling_seed": seed,
+        "sampling_scope": normalized_split,
     }
 
     return SanitizationDataset(
-        sampled,
+        sampled_examples,
         name=adapter.name,
-        split=split,
-        variant=variant,
+        split=normalized_split,
+        variant=effective_variant,
         seed=seed,
         metadata=metadata,
     )
